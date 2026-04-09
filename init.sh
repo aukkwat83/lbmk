@@ -138,9 +138,9 @@ if [ -d "$_sbase_dir" ] && ! "$_sbase_dir/sha512sum" </dev/null 2>/dev/null; the
 fi
 
 # --- Unifont for GRUB ---
-# Copy (not symlink) unifont so it survives Guix store garbage collection.
-# mkhelper.cfg uses ${PWD}/cache/fonts-misc/unifont.pcf.gz which is
-# expanded at build time, so no hardcoded paths needed.
+# Copy (not symlink) unifont so it survives Guix store garbage collection,
+# then patch mkhelper.cfg with --with-unifont so GRUB's configure finds it.
+# This avoids modifying the original config/data/grub/mkhelper.cfg in git.
 
 fonts_dir="${PWD}/cache/fonts-misc"
 mkdir -p "$fonts_dir"
@@ -154,6 +154,13 @@ if [ ! -f "$fonts_dir/unifont.pcf.gz" ]; then
         printf "ERROR: unifont.pcf.gz not found. Are you in guix shell -m manifest.scm?\n" >&2
         exit 1
     fi
+fi
+
+_grub_cfg="config/data/grub/mkhelper.cfg"
+_unifont_arg="--with-unifont=${PWD}/cache/fonts-misc/unifont.pcf.gz"
+if ! grep -q -- '--with-unifont' "$_grub_cfg"; then
+    sed -i "s|autoconfargs=\"|autoconfargs=\"${_unifont_arg} |" "$_grub_cfg"
+    printf "Patched %s with unifont path\n" "$_grub_cfg"
 fi
 
 # --- Detect path change and clean stale build trees ---
