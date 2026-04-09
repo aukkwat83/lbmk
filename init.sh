@@ -164,8 +164,8 @@ if ! grep -q -- '--with-unifont' "$_grub_cfg"; then
 fi
 
 # --- Detect path change and clean stale build trees ---
-# GRUB's ./configure bakes the unifont path into its Makefile.
-# If the project directory changed, those Makefiles are stale.
+# GRUB's ./configure and coreboot crossgcc bake absolute paths into
+# Makefiles. If the project directory changed, those builds are stale.
 
 _init_state="${PWD}/cache/.init_path"
 _old_path=""
@@ -173,10 +173,45 @@ _old_path=""
 
 if [ -n "$_old_path" ] && [ "$_old_path" != "$PWD" ]; then
     printf "Project path changed: %s -> %s\n" "$_old_path" "$PWD"
+
     printf "Cleaning stale GRUB build trees...\n"
     rm -rf "${PWD}"/src/grub/*/
+
+    printf "Cleaning stale crossgcc (baked paths)...\n"
+    for _cbdir in "${PWD}"/src/coreboot/*/; do
+        [ -d "$_cbdir/util/crossgcc/xgcc" ] && rm -rf "$_cbdir/util/crossgcc/xgcc"
+    done
+    rm -f "${PWD}"/elf/coreboot/*/xgcc_*_was_compiled
+
+    # Re-patch mkhelper.cfg with new path
+    sed -i "s|--with-unifont=[^ ]*|--with-unifont=${PWD}/cache/fonts-misc/unifont.pcf.gz|" "$_grub_cfg"
+    printf "Updated unifont path in %s\n" "$_grub_cfg"
 fi
 printf '%s' "$PWD" > "$_init_state"
+
+# --- Ensure coreboot crossgcc has Ada support ---
+# If crossgcc was built without Ada (--enable-languages=c only),
+# remove the flag file so lbmk rebuilds it with GNAT in PATH.
+
+for _xgcc_flag in "${PWD}"/elf/coreboot/*/xgcc_*_was_compiled; do
+    [ -f "$_xgcc_flag" ] || continue
+
+    # Derive the coreboot tree name from flag path
+    _cb_tree="$(basename "$(dirname "$_xgcc_flag")")"
+    _xgcc_gcc="${PWD}/src/coreboot/${_cb_tree}/util/crossgcc/xgcc/bin/i386-elf-gcc"
+
+    if [ -x "$_xgcc_gcc" ]; then
+        _xgcc_langs="$("$_xgcc_gcc" -v 2>&1 | grep -o 'enable-languages=[^ ]*' || true)"
+        case "$_xgcc_langs" in
+            *ada*) ;;  # Ada present, all good
+            *)
+                printf "crossgcc in coreboot/%s lacks Ada support, removing to trigger rebuild...\n" "$_cb_tree"
+                rm -rf "${PWD}/src/coreboot/${_cb_tree}/util/crossgcc/xgcc"
+                rm -f "$_xgcc_flag"
+                ;;
+        esac
+    fi
+done
 
 # --- SSL certificates for guix shell ---
 # guix shell --pure mode may not set SSL paths, so create a helper
