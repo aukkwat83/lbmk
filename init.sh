@@ -103,31 +103,50 @@ fi
 # --- gcc/cc/c99 wrappers with Ada (gnat1) support ---
 # Guix gcc has no Ada frontend, so `gcc -print-prog-name=gnat1` fails.
 # coreboot's buildgcc uses that check (hostcc_has_gnat1) to decide
-# whether to enable Ada in crossgcc. Adding -B pointing to the GNAT
-# libexec dir lets Guix gcc find gnat1 without replacing the compiler.
+# whether to enable Ada in crossgcc. We symlink ONLY gnat1 into an
+# isolated directory and use -B to point there, so gcc finds gnat1
+# but still uses its own cc1/cc1plus (avoiding GNAT library issues).
 
-_guix_gcc="$(command -v gcc)"
+# Resolve the real Guix gcc, skipping any wrapper we may have created
+# in a previous run. Search the guix profile/environment paths directly.
+_guix_gcc=""
+for _d in "$GUIX_ENVIRONMENT" "$GUIX_PROFILE" "$HOME/.guix-profile" "/run/current-system/profile"; do
+    if [ -n "$_d" ] && [ -x "$_d/bin/gcc" ]; then
+        _guix_gcc="$_d/bin/gcc"
+        break
+    fi
+done
+if [ -z "$_guix_gcc" ]; then
+    # Fallback: find gcc not in BIN_DIR
+    _guix_gcc="$(PATH="$(echo "$PATH" | tr ':' '\n' | grep -v "^${BIN_DIR}$" | tr '\n' ':')" command -v gcc)"
+fi
+if [ -z "$_guix_gcc" ] || [ ! -x "$_guix_gcc" ]; then
+    printf "ERROR: Cannot find Guix gcc\n" >&2
+    exit 1
+fi
 _gnat1_path="$("${GNAT_DIR}/bin/gcc" -print-prog-name=gnat1 2>/dev/null)"
-_gnat1_dir="$(dirname "$_gnat1_path")"
+_gnat1_shim="${HOME}/.local/lib/gnat1-shim"
+mkdir -p "$_gnat1_shim"
+ln -sf "$_gnat1_path" "$_gnat1_shim/gnat1"
 
 cat > "$BIN_DIR/gcc" <<EOF
 #!/bin/sh
-exec "${_guix_gcc}" -B "${_gnat1_dir}/" "\$@"
+exec "${_guix_gcc}" -B "${_gnat1_shim}/" "\$@"
 EOF
 chmod +x "$BIN_DIR/gcc"
 
 cat > "$BIN_DIR/cc" <<EOF
 #!/bin/sh
-exec "${_guix_gcc}" -B "${_gnat1_dir}/" "\$@"
+exec "${_guix_gcc}" -B "${_gnat1_shim}/" "\$@"
 EOF
 chmod +x "$BIN_DIR/cc"
 
 cat > "$BIN_DIR/c99" <<EOF
 #!/bin/sh
-exec "${_guix_gcc}" -B "${_gnat1_dir}/" -std=c99 "\$@"
+exec "${_guix_gcc}" -B "${_gnat1_shim}/" -std=c99 "\$@"
 EOF
 chmod +x "$BIN_DIR/c99"
-printf "Created gcc/cc/c99 wrappers with Ada support (-B %s)\n" "$_gnat1_dir"
+printf "Created gcc/cc/c99 wrappers with Ada support (-B %s)\n" "$_gnat1_shim"
 
 # --- GNAT wrappers ---
 # gnatmake etc. call gcc internally, so prepend GNAT_DIR/bin to PATH
