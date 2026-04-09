@@ -33,12 +33,6 @@ create_wrapper() {
     printf "Created %s/%s\n" "$BIN_DIR" "$name"
 }
 
-create_wrapper cc '#!/bin/sh
-exec gcc "$@"'
-
-create_wrapper c99 '#!/bin/sh
-exec gcc -std=c99 "$@"'
-
 command -v python >/dev/null 2>&1 || \
     create_wrapper python '#!/bin/sh
 exec python3 "$@"'
@@ -105,6 +99,35 @@ patch_elf_interp "${PWD}/util/libreboot-utils"
 if [ "$patch_count" -gt 0 ]; then
     printf "Patched %d ELF files\n" "$patch_count"
 fi
+
+# --- gcc/cc/c99 wrappers with Ada (gnat1) support ---
+# Guix gcc has no Ada frontend, so `gcc -print-prog-name=gnat1` fails.
+# coreboot's buildgcc uses that check (hostcc_has_gnat1) to decide
+# whether to enable Ada in crossgcc. Adding -B pointing to the GNAT
+# libexec dir lets Guix gcc find gnat1 without replacing the compiler.
+
+_guix_gcc="$(command -v gcc)"
+_gnat1_path="$("${GNAT_DIR}/bin/gcc" -print-prog-name=gnat1 2>/dev/null)"
+_gnat1_dir="$(dirname "$_gnat1_path")"
+
+cat > "$BIN_DIR/gcc" <<EOF
+#!/bin/sh
+exec "${_guix_gcc}" -B "${_gnat1_dir}/" "\$@"
+EOF
+chmod +x "$BIN_DIR/gcc"
+
+cat > "$BIN_DIR/cc" <<EOF
+#!/bin/sh
+exec "${_guix_gcc}" -B "${_gnat1_dir}/" "\$@"
+EOF
+chmod +x "$BIN_DIR/cc"
+
+cat > "$BIN_DIR/c99" <<EOF
+#!/bin/sh
+exec "${_guix_gcc}" -B "${_gnat1_dir}/" -std=c99 "\$@"
+EOF
+chmod +x "$BIN_DIR/c99"
+printf "Created gcc/cc/c99 wrappers with Ada support (-B %s)\n" "$_gnat1_dir"
 
 # --- GNAT wrappers ---
 # gnatmake etc. call gcc internally, so prepend GNAT_DIR/bin to PATH

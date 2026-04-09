@@ -14,7 +14,7 @@
              (gnu packages base)
              (gnu packages bison)
              (gnu packages bootloaders)
-             (gnu packages ccache)
+
              (gnu packages cdrom)
              (gnu packages cmake)
              (gnu packages compression)
@@ -139,9 +139,6 @@
 
   ;; Debugging
   gdb
-
-  ;; Caching
-  ccache
 
   ;; Documentation
   doxygen
