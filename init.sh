@@ -175,7 +175,7 @@ _sbase_dir="${PWD}/util/sbase"
 if [ -d "$_sbase_dir" ] && ! "$_sbase_dir/sha512sum" </dev/null 2>/dev/null; then
     printf "Rebuilding sbase for Guix System...\n"
     make -C "$_sbase_dir" clean 2>/dev/null || true
-    make -C "$_sbase_dir" -j"$(nproc)"
+    make -C "$_sbase_dir" CC="${_guix_gcc}" -j"$(nproc)"
     printf "sbase rebuilt.\n"
 fi
 
@@ -252,6 +252,18 @@ for _xgcc_flag in "${PWD}"/elf/coreboot/*/xgcc_*_was_compiled; do
                 rm -f "$_xgcc_flag"
                 ;;
         esac
+    fi
+done
+
+# --- Disable ccache in coreboot configs ---
+# ccache is not in our Guix manifest. If a stale .config enables it,
+# coreboot's toolchain.mk will error out. Patch any existing .config.
+
+for _cb_config in "${PWD}"/src/coreboot/*/.config; do
+    [ -f "$_cb_config" ] || continue
+    if grep -q '^CONFIG_CCACHE=y' "$_cb_config"; then
+        sed -i '/^CONFIG_CCACHE=y$/d' "$_cb_config"
+        printf "Disabled ccache in %s\n" "$_cb_config"
     fi
 done
 
