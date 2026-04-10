@@ -255,17 +255,23 @@ for _xgcc_flag in "${PWD}"/elf/coreboot/*/xgcc_*_was_compiled; do
     fi
 done
 
-# --- Disable ccache in coreboot configs ---
-# ccache is not in our Guix manifest. If a stale .config enables it,
-# coreboot's toolchain.mk will error out. Patch any existing .config.
+# --- Fake ccache shim ---
+# lbmk's include/rom.sh hardcodes "CONFIG_CCACHE=y" into the coreboot
+# .config on every build. Removing it from .config doesn't help — it
+# gets re-added. Instead, provide a no-op ccache wrapper that just
+# exec's its arguments, so coreboot's toolchain.mk PATH check passes
+# and the build proceeds without actually caching anything.
 
-for _cb_config in "${PWD}"/src/coreboot/*/.config; do
-    [ -f "$_cb_config" ] || continue
-    if grep -q '^CONFIG_CCACHE=y' "$_cb_config"; then
-        sed -i '/^CONFIG_CCACHE=y$/d' "$_cb_config"
-        printf "Disabled ccache in %s\n" "$_cb_config"
-    fi
-done
+if ! command -v ccache >/dev/null 2>&1 || \
+   [ "$(readlink -f "$(command -v ccache 2>/dev/null)")" = "$BIN_DIR/ccache" ]; then
+    cat > "$BIN_DIR/ccache" <<'CCACHE_EOF'
+#!/bin/sh
+# No-op ccache shim: just run the wrapped command without caching.
+exec "$@"
+CCACHE_EOF
+    chmod +x "$BIN_DIR/ccache"
+    printf "Created no-op ccache shim at %s\n" "$BIN_DIR/ccache"
+fi
 
 # --- SSL certificates for guix shell ---
 # guix shell --pure mode may not set SSL paths, so create a helper
