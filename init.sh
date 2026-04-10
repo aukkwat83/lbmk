@@ -16,6 +16,12 @@ fi
 
 BIN_DIR="$HOME/.local/bin"
 
+# Ensure our wrappers take precedence over guix profile binaries inside
+# child processes spawned by this script (notably `make crossgcc-i386`).
+# Without this, gcc resolves to /gnu/store/.../bin/gcc — which has no Ada
+# frontend — and coreboot's buildgcc detects "no gnat1" → builds C-only.
+export PATH="$BIN_DIR:$PATH"
+
 GNAT_VERSION="15.2.0-1"
 GNAT_DIR="$HOME/.local/lib/gnat-${GNAT_VERSION}"
 GNAT_TARBALL="gnat-x86_64-linux-${GNAT_VERSION}.tar.gz"
@@ -84,9 +90,9 @@ patch_elf_interp() {
     done
 }
 
-# GNAT binaries
-patch_elf_interp "${GNAT_DIR}/bin"
-patch_elf_interp "${GNAT_DIR}/libexec"
+# Patch the ENTIRE GNAT tree — it has ELF binaries in bin/, libexec/,
+# and x86_64-pc-linux-gnu/bin/ (assembler, linker, etc.)
+patch_elf_interp "${GNAT_DIR}"
 
 # coreboot tools (cbfstool, ifdtool, rmodtool, etc.)
 for _elfdir in "${PWD}"/elf/coreboot/*/; do
@@ -100,15 +106,18 @@ if [ "$patch_count" -gt 0 ]; then
     printf "Patched %d ELF files\n" "$patch_count"
 fi
 
-# --- gcc/cc/c99 wrappers with Ada (gnat1) support ---
-# Guix gcc has no Ada frontend, so `gcc -print-prog-name=gnat1` fails.
-# coreboot's buildgcc uses that check (hostcc_has_gnat1) to decide
-# whether to enable Ada in crossgcc. We symlink ONLY gnat1 into an
-# isolated directory and use -B to point there, so gcc finds gnat1
-# but still uses its own cc1/cc1plus (avoiding GNAT library issues).
+# --- gcc/cc/c99 wrappers using GNAT gcc ---
+# Guix gcc is compiled WITHOUT Ada support. coreboot's crossgcc build
+# needs a host compiler that can compile Ada (gnat1). The GNAT FSF gcc
+# has Ada built in. We wrap it so it finds guix system headers and libs
+# via C_INCLUDE_PATH / LIBRARY_PATH (set by guix shell), and shared
+# libs at runtime via LD_LIBRARY_PATH.
+#
+# This wrapper replaces the old -B gnat1-shim approach, which failed
+# because guix gcc's driver doesn't recognize .adb files at all.
 
-# Resolve the real Guix gcc, skipping any wrapper we may have created
-# in a previous run. Search the guix profile/environment paths directly.
+# Resolve the real Guix gcc — needed for sbase build (avoids GNAT's
+# bundled as/ld which can be slower or incompatible for plain C).
 _guix_gcc=""
 for _d in "$GUIX_ENVIRONMENT" "$GUIX_PROFILE" "$HOME/.guix-profile" "/run/current-system/profile"; do
     if [ -n "$_d" ] && [ -x "$_d/bin/gcc" ]; then
@@ -117,36 +126,41 @@ for _d in "$GUIX_ENVIRONMENT" "$GUIX_PROFILE" "$HOME/.guix-profile" "/run/curren
     fi
 done
 if [ -z "$_guix_gcc" ]; then
-    # Fallback: find gcc not in BIN_DIR
     _guix_gcc="$(PATH="$(echo "$PATH" | tr ':' '\n' | grep -v "^${BIN_DIR}$" | tr '\n' ':')" command -v gcc)"
 fi
 if [ -z "$_guix_gcc" ] || [ ! -x "$_guix_gcc" ]; then
     printf "ERROR: Cannot find Guix gcc\n" >&2
     exit 1
 fi
-_gnat1_path="$("${GNAT_DIR}/bin/gcc" -print-prog-name=gnat1 2>/dev/null)"
-_gnat1_shim="${HOME}/.local/lib/gnat1-shim"
-mkdir -p "$_gnat1_shim"
-ln -sf "$_gnat1_path" "$_gnat1_shim/gnat1"
+
+_gnat_gcc="${GNAT_DIR}/bin/gcc"
+
+# GNAT gcc produces binaries with /lib64/ld-linux-x86-64.so.2 interpreter,
+# which doesn't exist on Guix. Pass --dynamic-linker to the linker so
+# produced binaries use the Guix glibc interpreter and can actually run.
+# This is harmless for compile-only (-c) invocations — -Wl flags are ignored.
 
 cat > "$BIN_DIR/gcc" <<EOF
 #!/bin/sh
-exec "${_guix_gcc}" -B "${_gnat1_shim}/" "\$@"
+export LD_LIBRARY_PATH="\${LIBRARY_PATH:+\$LIBRARY_PATH}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+exec "${_gnat_gcc}" -Wl,--dynamic-linker="${LD_LINUX}" "\$@"
 EOF
 chmod +x "$BIN_DIR/gcc"
 
 cat > "$BIN_DIR/cc" <<EOF
 #!/bin/sh
-exec "${_guix_gcc}" -B "${_gnat1_shim}/" "\$@"
+export LD_LIBRARY_PATH="\${LIBRARY_PATH:+\$LIBRARY_PATH}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+exec "${_gnat_gcc}" -Wl,--dynamic-linker="${LD_LINUX}" "\$@"
 EOF
 chmod +x "$BIN_DIR/cc"
 
 cat > "$BIN_DIR/c99" <<EOF
 #!/bin/sh
-exec "${_guix_gcc}" -B "${_gnat1_shim}/" -std=c99 "\$@"
+export LD_LIBRARY_PATH="\${LIBRARY_PATH:+\$LIBRARY_PATH}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+exec "${_gnat_gcc}" -Wl,--dynamic-linker="${LD_LINUX}" -std=c99 "\$@"
 EOF
 chmod +x "$BIN_DIR/c99"
-printf "Created gcc/cc/c99 wrappers with Ada support (-B %s)\n" "$_gnat1_shim"
+printf "Created gcc/cc/c99 wrappers using GNAT gcc with Ada support\n"
 
 # --- GNAT wrappers ---
 # gnatmake etc. call gcc internally, so prepend GNAT_DIR/bin to PATH
@@ -232,26 +246,73 @@ fi
 printf '%s' "$PWD" > "$_init_state"
 
 # --- Ensure coreboot crossgcc has Ada support ---
-# If crossgcc was built without Ada (--enable-languages=c only),
-# remove the flag file so lbmk rebuilds it with GNAT in PATH.
+# coreboot's buildgcc decides Ada support via:
+#     [ -x "$(${CC} -print-prog-name=gnat1)" ]
+# Inside `guix shell`, the guix-profile bin comes BEFORE ~/.local/bin in
+# PATH, so our gcc wrapper is bypassed when ./mk invokes the build. The
+# crossgcc then ends up as --enable-languages=c (no Ada) and later fails:
+#     i386-elf-gcc: error: src/lib/gnat/a-unccon.ads:
+#     Ada compiler not installed on this system
+#
+# Fix: build crossgcc HERE in init.sh, where we control PATH and our gcc
+# wrapper IS first. Then drop the lbmk flag file so ./mk skips rebuild.
 
-for _xgcc_flag in "${PWD}"/elf/coreboot/*/xgcc_*_was_compiled; do
-    [ -f "$_xgcc_flag" ] || continue
+build_crossgcc_with_ada() {
+    local cb_tree="$1"
+    local cb_dir="${PWD}/src/coreboot/${cb_tree}"
+    local flag_dir="${PWD}/elf/coreboot/${cb_tree}"
+    local flag_file="${flag_dir}/xgcc_i386_was_compiled"
 
-    # Derive the coreboot tree name from flag path
-    _cb_tree="$(basename "$(dirname "$_xgcc_flag")")"
-    _xgcc_gcc="${PWD}/src/coreboot/${_cb_tree}/util/crossgcc/xgcc/bin/i386-elf-gcc"
+    [ -d "$cb_dir" ] || return 0
 
-    if [ -x "$_xgcc_gcc" ]; then
+    printf "Building coreboot crossgcc-i386 with Ada (tree: %s)...\n" "$cb_tree"
+    rm -rf "${cb_dir}/util/crossgcc/xgcc"
+
+    # Sanity check: our wrapper must be first and must find gnat1
+    local _check_gnat1
+    _check_gnat1="$(gcc -print-prog-name=gnat1 2>/dev/null)"
+    if [ ! -x "$_check_gnat1" ]; then
+        printf "ERROR: gcc wrapper not finding gnat1 (got: %s)\n" "$_check_gnat1" >&2
+        printf "       PATH=%s\n" "$PATH" >&2
+        return 1
+    fi
+
+    # BIN_DIR must be first so buildgcc finds our gcc wrapper (with -B gnat1).
+    # Do NOT put GNAT_DIR/bin first — GNAT's gcc can't find guix libraries.
+    if ! make -C "${cb_dir}" crossgcc-i386 CPUS="$(nproc)"; then
+        printf "ERROR: crossgcc build failed\n" >&2
+        return 1
+    fi
+
+    mkdir -p "$flag_dir"
+    touch "$flag_file"
+    printf "crossgcc built with Ada and flagged: %s\n" "$flag_file"
+}
+
+# For every existing coreboot tree, ensure crossgcc has Ada. If xgcc is
+# missing or built without Ada, (re)build it from here so we control PATH.
+for _cb_dir in "${PWD}"/src/coreboot/*/; do
+    [ -d "$_cb_dir" ] || continue
+    _cb_tree="$(basename "$_cb_dir")"
+    _xgcc_gcc="${_cb_dir}util/crossgcc/xgcc/bin/i386-elf-gcc"
+
+    _needs_build=0
+    if [ ! -x "$_xgcc_gcc" ]; then
+        _needs_build=1
+    else
         _xgcc_langs="$("$_xgcc_gcc" -v 2>&1 | grep -o 'enable-languages=[^ ]*' || true)"
         case "$_xgcc_langs" in
-            *ada*) ;;  # Ada present, all good
+            *ada*) ;;  # already has Ada, nothing to do
             *)
-                printf "crossgcc in coreboot/%s lacks Ada support, removing to trigger rebuild...\n" "$_cb_tree"
-                rm -rf "${PWD}/src/coreboot/${_cb_tree}/util/crossgcc/xgcc"
-                rm -f "$_xgcc_flag"
+                printf "crossgcc in coreboot/%s lacks Ada (%s)\n" \
+                    "$_cb_tree" "$_xgcc_langs"
+                _needs_build=1
                 ;;
         esac
+    fi
+
+    if [ "$_needs_build" = "1" ]; then
+        build_crossgcc_with_ada "$_cb_tree" || exit 1
     fi
 done
 
