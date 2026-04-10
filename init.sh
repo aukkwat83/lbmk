@@ -140,24 +140,28 @@ _gnat_gcc="${GNAT_DIR}/bin/gcc"
 # produced binaries use the Guix glibc interpreter and can actually run.
 # This is harmless for compile-only (-c) invocations — -Wl flags are ignored.
 
+# Build the linker flags string. We bake --dynamic-linker (Guix glibc)
+# but resolve -rpath at runtime from LIBRARY_PATH (set by guix shell).
+_wl_interp="-Wl,--dynamic-linker=${LD_LINUX}"
+
 cat > "$BIN_DIR/gcc" <<EOF
 #!/bin/sh
 export LD_LIBRARY_PATH="\${LIBRARY_PATH:+\$LIBRARY_PATH}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
-exec "${_gnat_gcc}" -Wl,--dynamic-linker="${LD_LINUX}" "\$@"
+exec "${_gnat_gcc}" ${_wl_interp} \${LIBRARY_PATH:+-Wl,-rpath,\$LIBRARY_PATH} "\$@"
 EOF
 chmod +x "$BIN_DIR/gcc"
 
 cat > "$BIN_DIR/cc" <<EOF
 #!/bin/sh
 export LD_LIBRARY_PATH="\${LIBRARY_PATH:+\$LIBRARY_PATH}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
-exec "${_gnat_gcc}" -Wl,--dynamic-linker="${LD_LINUX}" "\$@"
+exec "${_gnat_gcc}" ${_wl_interp} \${LIBRARY_PATH:+-Wl,-rpath,\$LIBRARY_PATH} "\$@"
 EOF
 chmod +x "$BIN_DIR/cc"
 
 cat > "$BIN_DIR/c99" <<EOF
 #!/bin/sh
 export LD_LIBRARY_PATH="\${LIBRARY_PATH:+\$LIBRARY_PATH}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
-exec "${_gnat_gcc}" -Wl,--dynamic-linker="${LD_LINUX}" -std=c99 "\$@"
+exec "${_gnat_gcc}" ${_wl_interp} \${LIBRARY_PATH:+-Wl,-rpath,\$LIBRARY_PATH} -std=c99 "\$@"
 EOF
 chmod +x "$BIN_DIR/c99"
 printf "Created gcc/cc/c99 wrappers using GNAT gcc with Ada support\n"
@@ -245,76 +249,23 @@ if [ -n "$_old_path" ] && [ "$_old_path" != "$PWD" ]; then
 fi
 printf '%s' "$PWD" > "$_init_state"
 
-# --- Ensure coreboot crossgcc has Ada support ---
-# coreboot's buildgcc decides Ada support via:
-#     [ -x "$(${CC} -print-prog-name=gnat1)" ]
-# Inside `guix shell`, the guix-profile bin comes BEFORE ~/.local/bin in
-# PATH, so our gcc wrapper is bypassed when ./mk invokes the build. The
-# crossgcc then ends up as --enable-languages=c (no Ada) and later fails:
-#     i386-elf-gcc: error: src/lib/gnat/a-unccon.ads:
-#     Ada compiler not installed on this system
+# --- Ensure ~/.local/bin is first in PATH inside guix shell ---
+# guix shell prepends /gnu/store/.../profile/bin to PATH, pushing
+# ~/.local/bin behind it. Our gcc wrapper (GNAT gcc with Ada) must
+# come FIRST so coreboot's buildgcc detects gnat1 and builds crossgcc
+# with --enable-languages=c,ada. Without this, crossgcc has no Ada
+# and the coreboot build fails with:
+#     i386-elf-gcc: error: Ada compiler not installed on this system
 #
-# Fix: build crossgcc HERE in init.sh, where we control PATH and our gcc
-# wrapper IS first. Then drop the lbmk flag file so ./mk skips rebuild.
+# Fix: add PATH prepend to ~/.bashrc so every interactive shell
+# (including guix shell) gets ~/.local/bin first.
 
-build_crossgcc_with_ada() {
-    local cb_tree="$1"
-    local cb_dir="${PWD}/src/coreboot/${cb_tree}"
-    local flag_dir="${PWD}/elf/coreboot/${cb_tree}"
-    local flag_file="${flag_dir}/xgcc_i386_was_compiled"
-
-    [ -d "$cb_dir" ] || return 0
-
-    printf "Building coreboot crossgcc-i386 with Ada (tree: %s)...\n" "$cb_tree"
-    rm -rf "${cb_dir}/util/crossgcc/xgcc"
-
-    # Sanity check: our wrapper must be first and must find gnat1
-    local _check_gnat1
-    _check_gnat1="$(gcc -print-prog-name=gnat1 2>/dev/null)"
-    if [ ! -x "$_check_gnat1" ]; then
-        printf "ERROR: gcc wrapper not finding gnat1 (got: %s)\n" "$_check_gnat1" >&2
-        printf "       PATH=%s\n" "$PATH" >&2
-        return 1
-    fi
-
-    # BIN_DIR must be first so buildgcc finds our gcc wrapper (with -B gnat1).
-    # Do NOT put GNAT_DIR/bin first — GNAT's gcc can't find guix libraries.
-    if ! make -C "${cb_dir}" crossgcc-i386 CPUS="$(nproc)"; then
-        printf "ERROR: crossgcc build failed\n" >&2
-        return 1
-    fi
-
-    mkdir -p "$flag_dir"
-    touch "$flag_file"
-    printf "crossgcc built with Ada and flagged: %s\n" "$flag_file"
-}
-
-# For every existing coreboot tree, ensure crossgcc has Ada. If xgcc is
-# missing or built without Ada, (re)build it from here so we control PATH.
-for _cb_dir in "${PWD}"/src/coreboot/*/; do
-    [ -d "$_cb_dir" ] || continue
-    _cb_tree="$(basename "$_cb_dir")"
-    _xgcc_gcc="${_cb_dir}util/crossgcc/xgcc/bin/i386-elf-gcc"
-
-    _needs_build=0
-    if [ ! -x "$_xgcc_gcc" ]; then
-        _needs_build=1
-    else
-        _xgcc_langs="$("$_xgcc_gcc" -v 2>&1 | grep -o 'enable-languages=[^ ]*' || true)"
-        case "$_xgcc_langs" in
-            *ada*) ;;  # already has Ada, nothing to do
-            *)
-                printf "crossgcc in coreboot/%s lacks Ada (%s)\n" \
-                    "$_cb_tree" "$_xgcc_langs"
-                _needs_build=1
-                ;;
-        esac
-    fi
-
-    if [ "$_needs_build" = "1" ]; then
-        build_crossgcc_with_ada "$_cb_tree" || exit 1
-    fi
-done
+_bashrc_marker="# lbmk-init: ~/.local/bin first for Ada gcc wrapper"
+if ! grep -qF "$_bashrc_marker" "$HOME/.bashrc" 2>/dev/null; then
+    printf '\n%s\nexport PATH="$HOME/.local/bin:$PATH"\n' \
+        "$_bashrc_marker" >> "$HOME/.bashrc"
+    printf "Added PATH prepend to ~/.bashrc\n"
+fi
 
 # --- Fake ccache shim ---
 # lbmk's include/rom.sh hardcodes "CONFIG_CCACHE=y" into the coreboot
@@ -359,18 +310,24 @@ SSLEOF
 chmod +x "$_ssl_helper"
 printf "Created %s\n" "$_ssl_helper"
 
-# --- Check PATH ---
-
-case ":$PATH:" in
-    *":$BIN_DIR:"*) ;;
-    *)
-        printf "\nWARNING: %s is not in your PATH.\n" "$BIN_DIR"
-        printf "Add to your shell profile:\n"
-        printf "  export PATH=\"%s:\$PATH\"\n" "$BIN_DIR"
-        printf "  eval \"\$(guix-ssl-env)\"\n"
-        ;;
-esac
+# --- Verify PATH is correct ---
 
 printf "\nInit complete.\n"
-gnat --version | head -1
-printf "gcc: "; gcc --version | head -1
+
+# Check if our wrapper is actually first in PATH
+_which_gcc="$(command -v gcc 2>/dev/null)"
+case "$_which_gcc" in
+    "$BIN_DIR"/gcc)
+        printf "gcc wrapper: %s (OK)\n" "$_which_gcc"
+        gnat --version | head -1
+        printf "gcc: "; gcc --version | head -1
+        ;;
+    *)
+        printf "\n*** IMPORTANT: exit guix shell and re-enter ***\n"
+        printf "    Your gcc is: %s (should be %s/gcc)\n" "$_which_gcc" "$BIN_DIR"
+        printf "    Run:\n"
+        printf "      exit\n"
+        printf "      guix shell -m manifest.scm\n"
+        printf "    Then build normally with ./mk\n"
+        ;;
+esac
