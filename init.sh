@@ -133,50 +133,73 @@ if [ -z "$_guix_gcc" ] || [ ! -x "$_guix_gcc" ]; then
     exit 1
 fi
 
+# IMPORTANT: gnatlink hardcodes the absolute path of GNAT gcc when
+# linking Ada programs (e.g.
+# /home/guix/.local/lib/gnat-15.2.0-1/bin/gcc), bypassing PATH lookup.
+# To force --dynamic-linker even for gnatlink, we replace the GNAT gcc
+# binary itself with a wrapper script (saving the original as gcc.real).
+# This way EVERY invocation of GNAT gcc — direct, via PATH, or via
+# absolute path from gnatlink — gets the right interpreter and rpath.
+
+_gnat_gcc_real="${GNAT_DIR}/bin/gcc.real"
 _gnat_gcc="${GNAT_DIR}/bin/gcc"
 
-# GNAT gcc produces binaries with /lib64/ld-linux-x86-64.so.2 interpreter,
-# which doesn't exist on Guix. Pass --dynamic-linker to the linker so
-# produced binaries use the Guix glibc interpreter and can actually run.
-# This is harmless for compile-only (-c) invocations — -Wl flags are ignored.
+if [ ! -f "$_gnat_gcc_real" ]; then
+    # First time — preserve the original GNAT gcc
+    mv "$_gnat_gcc" "$_gnat_gcc_real"
+fi
 
-# Build the linker flags string. We bake --dynamic-linker (Guix glibc)
-# but resolve -rpath at runtime from LIBRARY_PATH (set by guix shell).
-_wl_interp="-Wl,--dynamic-linker=${LD_LINUX}"
+# Re-create the wrapper at GNAT_DIR/bin/gcc on every init run
+# (so updates to logic propagate even after partial re-runs).
+cat > "$_gnat_gcc" <<EOF
+#!/bin/sh
+export LD_LIBRARY_PATH="\${LIBRARY_PATH:+\$LIBRARY_PATH}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+exec "${_gnat_gcc_real}" -Wl,--dynamic-linker="${LD_LINUX}" \${LIBRARY_PATH:+-Wl,-rpath,\$LIBRARY_PATH} "\$@"
+EOF
+chmod +x "$_gnat_gcc"
+printf "Replaced GNAT gcc with wrapper (original: gcc.real)\n"
+
+# Now create BIN_DIR wrappers that just chain to the (now-wrapped) GNAT gcc.
+# These exist so coreboot's host build, sbase, etc. find a "gcc" with Ada
+# support via PATH lookup.
 
 cat > "$BIN_DIR/gcc" <<EOF
 #!/bin/sh
-export LD_LIBRARY_PATH="\${LIBRARY_PATH:+\$LIBRARY_PATH}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
-exec "${_gnat_gcc}" ${_wl_interp} \${LIBRARY_PATH:+-Wl,-rpath,\$LIBRARY_PATH} "\$@"
+exec "${_gnat_gcc}" "\$@"
 EOF
 chmod +x "$BIN_DIR/gcc"
 
 cat > "$BIN_DIR/cc" <<EOF
 #!/bin/sh
-export LD_LIBRARY_PATH="\${LIBRARY_PATH:+\$LIBRARY_PATH}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
-exec "${_gnat_gcc}" ${_wl_interp} \${LIBRARY_PATH:+-Wl,-rpath,\$LIBRARY_PATH} "\$@"
+exec "${_gnat_gcc}" "\$@"
 EOF
 chmod +x "$BIN_DIR/cc"
 
 cat > "$BIN_DIR/c99" <<EOF
 #!/bin/sh
-export LD_LIBRARY_PATH="\${LIBRARY_PATH:+\$LIBRARY_PATH}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
-exec "${_gnat_gcc}" ${_wl_interp} \${LIBRARY_PATH:+-Wl,-rpath,\$LIBRARY_PATH} -std=c99 "\$@"
+exec "${_gnat_gcc}" -std=c99 "\$@"
 EOF
 chmod +x "$BIN_DIR/c99"
-printf "Created gcc/cc/c99 wrappers using GNAT gcc with Ada support\n"
+printf "Created gcc/cc/c99 wrappers in %s\n" "$BIN_DIR"
 
 # --- GNAT wrappers ---
-# gnatmake etc. call gcc internally, so prepend GNAT_DIR/bin to PATH
-# so they find the GNAT gcc (with Ada frontend). LD_LIBRARY_PATH uses
-# LIBRARY_PATH from guix shell at runtime.
+# gnatmake etc. call "gcc" by name to compile Ada sources. We must
+# ensure that "gcc" resolves to OUR wrapper (which adds --dynamic-linker
+# and -rpath), NOT to GNAT's bare gcc — otherwise the produced Ada
+# binaries embed /lib64/ld-linux-x86-64.so.2 and cannot run on Guix.
+# Critical example: coreboot's crossgcc gcc-14.2 build uses gnatmake to
+# build gen_il-main, then immediately runs it. If interp is wrong, the
+# whole crossgcc build fails with "cannot execute: required file not found".
+#
+# Solution: BIN_DIR (with our gcc wrapper) MUST come first in PATH so
+# gnatmake's internal `gcc` lookup finds our wrapper.
 
 for bin in "${GNAT_DIR}/bin/gnat"*; do
     [ -x "$bin" ] || continue
     name="$(basename "$bin")"
     cat > "$BIN_DIR/$name" <<EOF
 #!/bin/sh
-export PATH="${GNAT_DIR}/bin:\$PATH"
+export PATH="${BIN_DIR}:${GNAT_DIR}/bin:\$PATH"
 export LD_LIBRARY_PATH="\${LIBRARY_PATH:+\$LIBRARY_PATH:}${GNAT_DIR}/lib:${GNAT_DIR}/lib64\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
 exec "${bin}" "\$@"
 EOF
