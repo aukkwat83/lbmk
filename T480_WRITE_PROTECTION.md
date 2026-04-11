@@ -139,6 +139,122 @@ Libreboot config สำหรับ T480 (`config/coreboot/t480_vfsp_16mb/`) ม
 
 ---
 
+## คำสั่ง flashrom/flashprog สำหรับตรวจสอบสถานะ WP
+
+### ตรวจสอบพื้นฐาน
+
+```bash
+# ตรวจสอบว่า flashprog เห็นชิปหรือไม่ และชิปรุ่นอะไร
+sudo flashprog -p internal --flash-name
+
+# อ่านข้อมูลชิปทั้งหมด (probe)
+sudo flashprog -p internal
+
+# ดูสถานะ write protection ปัจจุบัน
+sudo flashprog -p internal --wp-status
+
+# ดู write protection range ที่ตั้งไว้
+sudo flashprog -p internal --wp-list
+```
+
+### ตรวจสอบว่าเขียนได้หรือไม่ (ทดสอบ WP)
+
+```bash
+# backup ROM ปัจจุบันก่อนเสมอ
+sudo flashprog -p internal -r backup.rom
+
+# verify ว่า backup ถูกต้อง (อ่านซ้ำแล้วเทียบ)
+sudo flashprog -p internal -r backup2.rom
+sha512sum backup.rom backup2.rom  # hash ต้องตรงกัน
+
+# ลองเขียน (verify only — ไม่เขียนจริง) เพื่อเช็คว่า WP ทำงาน
+sudo flashprog -p internal --wp-status
+# ถ้า WP เปิดอยู่ จะแสดง: WP: write protection is enabled
+# ถ้า WP ปิดอยู่ จะแสดง: WP: write protection is disabled
+```
+
+### ตรวจสอบ IFD region permissions
+
+```bash
+# อ่าน flash layout (ดูว่า region ไหนเข้าถึงได้บ้าง)
+sudo flashprog -p internal --fmap
+
+# อ่านเฉพาะ BIOS region
+sudo flashprog -p internal -r bios_region.bin --ifd -i bios
+
+# ลองอ่าน ME region (ถ้า IFD lock ทำงาน จะอ่านไม่ได้)
+sudo flashprog -p internal -r me_region.bin --ifd -i me
+# ถ้า ME region ถูกล็อค จะได้ error: "Transaction error!"
+
+# ลองอ่าน Flash Descriptor region
+sudo flashprog -p internal -r ifd_region.bin --ifd -i fd
+```
+
+### ตรวจสอบ BIOS_CNTL register (ระดับ chipset)
+
+```bash
+# อ่าน BIOS_CNTL register จาก PCI config space
+# LPC bridge = PCI 0:1f.0, offset 0xdc
+sudo setpci -s 0:1f.0 dc.b
+
+# ตีความผลลัพธ์ (เช่น ได้ "0a"):
+#   bit 0 (0x01) = BIOSWE  — 0=write disabled, 1=write enabled
+#   bit 1 (0x02) = BLE     — 0=no lock, 1=BIOS lock enabled
+#   bit 5 (0x20) = SMM_BWP — 0=no SMM protection, 1=SMM protects BIOS
+#
+# ตัวอย่าง:
+#   0x00 = ไม่มี protection ใดๆ (BIOSWE=0, BLE=0, SMM_BWP=0)
+#   0x02 = BLE enabled แต่ BIOSWE=0 (ป้องกันอยู่)
+#   0x22 = BLE + SMM_BWP enabled (ป้องกันเต็มที่)
+#   0x0a = BLE enabled + BIOSWE somehow set (ผิดปกติ)
+```
+
+### ตรวจสอบ SMI status
+
+```bash
+# หา PMBASE address ก่อน
+sudo setpci -s 0:1f.0 40.l
+# ผลลัพธ์เช่น "00001801" → PMBASE = 0x1800 (mask bit 0)
+
+# อ่าน SMI_EN register (PMBASE + 0x30)
+sudo iotools io_read32 0x1830
+# bit 0 = GBL_SMI_EN — 1=SMI enabled, 0=SMI disabled
+# ถ้า GBL_SMI_EN=0 แสดงว่า SMM protection ไม่ทำงาน แม้ BLE จะตั้งไว้
+
+# อ่าน SMI_LOCK (ใน GEN_PMCON register)
+# ถ้า SMI_LOCK=1 → GBL_SMI_EN แก้ไม่ได้ (ดี)
+# ถ้า SMI_LOCK=0 → attacker สามารถปิด GBL_SMI_EN ได้ (ไม่ดี)
+```
+
+### สรุปคำสั่งตรวจ WP แบบเร็ว (Quick Check)
+
+```bash
+#!/bin/bash
+echo "=== Flash Chip Info ==="
+sudo flashprog -p internal --flash-name
+
+echo ""
+echo "=== WP Status ==="
+sudo flashprog -p internal --wp-status
+
+echo ""
+echo "=== BIOS_CNTL Register ==="
+BIOS_CNTL=$(sudo setpci -s 0:1f.0 dc.b)
+echo "BIOS_CNTL = 0x${BIOS_CNTL}"
+VAL=$((16#${BIOS_CNTL}))
+echo "  BIOSWE  (bit 0) = $(( (VAL >> 0) & 1 ))  (0=protected, 1=writable)"
+echo "  BLE     (bit 1) = $(( (VAL >> 1) & 1 ))  (0=no lock, 1=locked)"
+echo "  SMM_BWP (bit 5) = $(( (VAL >> 5) & 1 ))  (0=no SMM WP, 1=SMM protects)"
+
+echo ""
+echo "=== IFD Region Access Test ==="
+sudo flashprog -p internal -r /tmp/ifd_test.bin --ifd -i fd 2>&1 | tail -3
+sudo flashprog -p internal -r /tmp/me_test.bin --ifd -i me 2>&1 | tail -3
+rm -f /tmp/ifd_test.bin /tmp/me_test.bin
+```
+
+---
+
 ## ข้อมูลอ้างอิงเฉพาะ T480
 
 - **Board config:** `config/coreboot/t480_vfsp_16mb/`
