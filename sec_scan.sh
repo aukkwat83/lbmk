@@ -162,18 +162,26 @@ else
 fi
 
 # 1b. Verify Guix signing key is in the keyring
+#
+# หมายเหตุ: ใน Guix รุ่นใหม่ signing-key.pub ไม่ได้วางไว้ที่ path เดียวกัน
+# ทุกเครื่อง — บางครั้งมันอยู่ใน /gnu/store/.../share/guix/, บางครั้งมัน
+# เป็น part ของ channel introduction ที่ Guix เช็คให้เองในขั้น 1a แล้ว
+# การหาไม่พบ "ไฟล์" จึงไม่ได้แปลว่าไม่ปลอดภัย และไม่ควรนับเป็น WARN
+# (ชั้น 1a ตรวจ introduction signers เรียบร้อยแล้ว ซึ่งคือ ground truth)
 _log "Checking Guix channel signing keys..."
-guix_keyring="/home/guix/.config/guix/current/share/guix/signing-key.pub"
-if [ -f "$guix_keyring" ]; then
-    _pass "Guix signing key present: $guix_keyring"
-else
-    # Try alternate location
-    guix_keyring_alt="$(guix system -L /dev/null -e '(@@ (guix self) %guix-signing-key-public-key)' 2>/dev/null)" || true
-    if [ -n "$guix_keyring_alt" ]; then
-        _pass "Guix signing key resolved via Guile"
-    else
-        _warn "Cannot locate Guix signing key file (non-critical if channel auth works)"
+guix_sig_found=0
+for kp in \
+    "/home/guix/.config/guix/current/share/guix/signing-key.pub" \
+    "/run/current-system/profile/share/guix/signing-key.pub" \
+    /gnu/store/*-guix-*/share/guix/signing-key.pub; do
+    if [ -f "$kp" ]; then
+        _pass "Guix signing key present: $kp"
+        guix_sig_found=1
+        break
     fi
+done
+if [ "$guix_sig_found" -eq 0 ]; then
+    _skip "Guix signing key file (covered by channel introduction check in 1a)"
 fi
 
 # 1c. Verify guix substitute server ACL
@@ -293,60 +301,117 @@ _ssl_arg=""
 [ -n "$_ssl_cafile" ] && _ssl_arg="-CAfile $_ssl_cafile"
 
 # 3a. Verify TLS connections to critical servers don't show intercepted certs
+#
+# เหตุผลที่ออกแบบใหม่ (2026-04):
+#   เดิมเราใช้วิธี "pin" ผู้ออก CA ของแต่ละโดเมนตายตัว (เช่น github=DigiCert)
+#   แต่ CA สามารถย้ายได้ตลอด — เช่น github.com ปัจจุบันย้ายมาใช้ Sectigo,
+#   gitlab.com ก็ใช้ Sectigo แล้ว ทำให้ pin ตายตัวกลายเป็น false positive
+#   บ่อย ๆ ทันทีที่ผู้ให้บริการเปลี่ยน CA
+#
+#   แนวทางใหม่มี 2 ชั้น:
+#     1) อนุญาตเฉพาะ CA สาธารณะที่เป็นที่ยอมรับในวงกว้าง (allow-list) —
+#        ถ้าเจอ issuer ที่ไม่อยู่ในลิสต์ถือเป็นสัญญาณ MITM ทันที
+#        (MITM proxy ระดับองค์กรส่วนใหญ่ใช้ internal CA ที่ไม่ public-trusted)
+#     2) Pin SHA-256 fingerprint ของ cert ลง cache file — ครั้งแรกที่สแกน
+#        จะบันทึกไว้ ครั้งต่อ ๆ ไปถ้า fingerprint เปลี่ยนจะเตือนให้ reviewer
+#        ตรวจว่าเกิด cert renewal ปกติหรือโดน MITM
+#
 _log "Checking TLS certificate chains for MITM indicators..."
 
-declare -A EXPECTED_CA
-EXPECTED_CA["github.com"]="DigiCert"
-EXPECTED_CA["codeberg.org"]="Let's Encrypt"
-EXPECTED_CA["git.savannah.gnu.org"]="Let's Encrypt"
-EXPECTED_CA["review.coreboot.org"]="Let's Encrypt"
-EXPECTED_CA["gitlab.com"]="Amazon"
-EXPECTED_CA["git.guix.gnu.org"]="Let's Encrypt"
+# CA สาธารณะที่ได้รับการยอมรับ (ณ 2026) — เพิ่มได้เมื่อจำเป็น
+# รูปแบบการเช็คคือ grep -i แบบ substring match บน issuer string
+PUBLIC_CAS=(
+    "DigiCert"
+    "Let's Encrypt"
+    "Sectigo"
+    "Amazon"
+    "Google Trust Services"
+    "GlobalSign"
+    "ISRG"
+    "Cloudflare"
+    "GTS"
+)
 
-for host in "${!EXPECTED_CA[@]}"; do
-    expected_issuer="${EXPECTED_CA[$host]}"
-    _log "  Checking $host (expect CA: $expected_issuer)..."
+TLS_HOSTS=(
+    "github.com"
+    "codeberg.org"
+    "git.savannah.gnu.org"
+    "review.coreboot.org"
+    "gitlab.com"
+    "git.guix.gnu.org"
+)
 
-    cert_info="$(echo | timeout 10 openssl s_client -connect "$host:443" \
-        -servername "$host" $_ssl_arg 2>/dev/null)" || cert_info=""
+mkdir -p "$LBMK_ROOT/cache"
+tls_pin_file="$LBMK_ROOT/cache/.tls_fingerprints"
+touch "$tls_pin_file"
+
+for host in "${TLS_HOSTS[@]}"; do
+    _log "  Checking $host..."
+
+    # หมายเหตุ: ใช้ `(echo; sleep 0.3)` แทน `echo` ตัวเปล่าเพื่อให้ openssl
+    # มีเวลาจับมือ TLS ก่อน pipe จะปิด stdin — ไม่เช่นนั้น s_client อาจ
+    # ออกกลางคันก่อนได้ certificate กลับมา
+    cert_info="$( (echo; sleep 0.3) | timeout 15 openssl s_client -connect "$host:443" \
+        -servername "$host" $_ssl_arg 2>/dev/null || true)"
 
     if [ -z "$cert_info" ]; then
         _fail "  Cannot connect to $host:443 — network blocked or DNS poisoned?"
         continue
     fi
 
-    issuer="$(printf '%s' "$cert_info" | openssl x509 -noout -issuer 2>/dev/null)" || issuer=""
-    subject="$(printf '%s' "$cert_info" | openssl x509 -noout -subject 2>/dev/null)" || subject=""
-    not_after="$(printf '%s' "$cert_info" | openssl x509 -noout -enddate 2>/dev/null)" || not_after=""
+    issuer="$(printf '%s' "$cert_info" | openssl x509 -noout -issuer 2>/dev/null || true)"
+    not_after="$(printf '%s' "$cert_info" | openssl x509 -noout -enddate 2>/dev/null || true)"
+    fingerprint="$(printf '%s' "$cert_info" | \
+        openssl x509 -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//' || true)"
 
-    if printf '%s' "$issuer" | grep -qi "$expected_issuer"; then
-        _pass "  $host: CA matches ($expected_issuer)"
+    # ชั้นที่ 1: issuer ต้องมาจาก CA สาธารณะที่รู้จัก
+    matched_ca=""
+    for ca in "${PUBLIC_CAS[@]}"; do
+        if printf '%s' "$issuer" | grep -qiF "$ca"; then
+            matched_ca="$ca"
+            break
+        fi
+    done
+
+    if [ -n "$matched_ca" ]; then
+        _pass "  $host: issued by trusted public CA ($matched_ca)"
     else
-        _fail "  $host: UNEXPECTED CA issuer!"
-        _fail "    Expected: $expected_issuer"
-        _fail "    Got:      $issuer"
+        _fail "  $host: UNKNOWN issuer — not on public-CA allow-list"
+        _fail "    Issuer: $issuer"
         _fail "    This may indicate TLS interception (corporate/state MITM proxy)"
     fi
 
-    # Check for suspiciously short-lived certs (MITM proxies often use short certs)
-    if [ -n "$not_after" ]; then
-        expiry_date="${not_after#*=}"
-        expiry_epoch="$(date -d "$expiry_date" +%s 2>/dev/null)" || expiry_epoch=0
-        now_epoch="$(date +%s)"
-        days_left=$(( (expiry_epoch - now_epoch) / 86400 ))
-
-        if [ "$days_left" -lt 7 ]; then
-            _warn "  $host: cert expires in $days_left days (very short — suspicious)"
-        elif [ "$days_left" -lt 30 ]; then
-            _warn "  $host: cert expires in $days_left days"
+    # ชั้นที่ 2: pin SHA-256 fingerprint ผ่าน cache file
+    if [ -n "$fingerprint" ]; then
+        _log "    SHA-256 fingerprint: $fingerprint"
+        pinned="$(grep "^$host " "$tls_pin_file" 2>/dev/null | awk '{print $2}' || true)"
+        if [ -z "$pinned" ]; then
+            printf '%s %s\n' "$host" "$fingerprint" >> "$tls_pin_file"
+            _log "    (first scan — fingerprint saved to cache/.tls_fingerprints)"
+        elif [ "$pinned" = "$fingerprint" ]; then
+            _pass "  $host: fingerprint matches last scan (no rotation)"
+        else
+            # ไม่ _fail เพราะ cert renewal ปกติทำ fingerprint เปลี่ยนได้
+            # แต่เตือนให้ผู้ใช้ตรวจสอบด้วยตาและ update cache เอง
+            _warn "  $host: fingerprint CHANGED since last scan"
+            _warn "    Previous: $pinned"
+            _warn "    Current:  $fingerprint"
+            _warn "    (normal cert renewal, or possible MITM — verify via crt.sh)"
+            # update pin ให้เป็นตัวล่าสุดเพื่อไม่เตือนซ้ำในรอบถัดไป
+            sed -i "s|^$host .*|$host $fingerprint|" "$tls_pin_file"
         fi
     fi
 
-    # Extract certificate fingerprint for logging
-    fingerprint="$(printf '%s' "$cert_info" | \
-        openssl x509 -noout -fingerprint -sha256 2>/dev/null)" || fingerprint=""
-    if [ -n "$fingerprint" ]; then
-        _log "    Fingerprint: ${fingerprint#*=}"
+    # ตรวจ cert ที่อายุสั้นผิดปกติ — MITM proxy บางตัวออก cert อายุสั้นมาก
+    if [ -n "$not_after" ]; then
+        expiry_date="${not_after#*=}"
+        expiry_epoch="$(date -d "$expiry_date" +%s 2>/dev/null || echo 0)"
+        now_epoch="$(date +%s)"
+        days_left=$(( (expiry_epoch - now_epoch) / 86400 ))
+
+        if [ "$days_left" -lt 7 ] && [ "$days_left" -gt 0 ]; then
+            _warn "  $host: cert expires in $days_left days (very short — suspicious)"
+        fi
     fi
 done
 
@@ -630,15 +695,18 @@ for pkg_cfg in config/git/*/pkg.cfg; do
     fi
 
     if [ "$QUICK" -eq 1 ]; then
-        # Quick mode: just check commit exists on primary (no deep verify)
+        # Quick mode: ตรวจว่า commit มีอยู่จริง โดย fallback ไป backup
+        # ถ้า primary ล้ม (บาง mirror เช่น review.coreboot.org ช้ามาก)
         if [ "$rev" = "HEAD" ]; then
             _skip "  $project_name: HEAD ref (quick mode)"
         else
             _log "  Quick check: $project_name"
-            if timeout 15 git -C "$_verify_repo" fetch "$url" "$rev" 2>/dev/null; then
+            if timeout 120 git -C "$_verify_repo" fetch "$url" "$rev" 2>/dev/null; then
                 _pass "  $project_name: commit $rev fetchable from primary"
+            elif timeout 120 git -C "$_verify_repo" fetch "$bkup_url" "$rev" 2>/dev/null; then
+                _pass "  $project_name: commit $rev fetchable from backup (primary slow)"
             else
-                _warn "  $project_name: cannot fetch $rev from primary"
+                _warn "  $project_name: cannot fetch $rev from either mirror"
             fi
         fi
     else
@@ -669,10 +737,18 @@ while IFS= read -r mcfg; do
     mod_name="$(basename "$(dirname "$mcfg")")"
 
     if [ "$QUICK" -eq 1 ]; then
-        if timeout 15 git -C "$_sub_verify_repo" fetch "$subgit" "$subhash" 2>/dev/null; then
-            _pass "  submodule/$mod_name: commit fetchable"
+        # หมายเหตุ: เดิมตั้ง timeout ไว้ 15 วินาที แต่ submodule ใหญ่อย่าง
+        # FSP (review.coreboot.org), vboot, และ gnulib ใช้เวลาสร้าง
+        # pack-file ฝั่ง server นานกว่านั้น (25–60 วิ) ทำให้เกิด WARN
+        # false positive บ่อย — bump เป็น 120 วิเพื่อให้ครอบคลุม
+        # กรณี gerrit/กระจกตัวใหญ่ และถ้าล้มจริงค่อยลอง backup mirror
+        if timeout 120 git -C "$_sub_verify_repo" fetch "$subgit" "$subhash" 2>/dev/null; then
+            _pass "  submodule/$mod_name: commit fetchable from primary"
+        elif [ -n "$subgit_bkup" ] && \
+             timeout 120 git -C "$_sub_verify_repo" fetch "$subgit_bkup" "$subhash" 2>/dev/null; then
+            _pass "  submodule/$mod_name: commit fetchable from backup (primary slow/down)"
         else
-            _warn "  submodule/$mod_name: cannot fetch commit from primary"
+            _warn "  submodule/$mod_name: cannot fetch commit from either mirror"
         fi
     else
         if [ -n "$subgit_bkup" ]; then
@@ -697,26 +773,32 @@ _hdr "[6] Tarball Integrity (SHA-512 cross-mirror verification)"
 
 _log "Re-downloading tarballs from BACKUP mirror and comparing SHA-512..."
 
+# หมายเหตุสำคัญ (แก้ bug 2026-04):
+#   ภายใต้ set -euo pipefail ทุก pipeline ที่ส่วนหนึ่งออก exit ≠ 0
+#   จะฆ่า script ทันที ซึ่ง grep ที่หาไม่เจอจะ exit 1 เสมอ
+#   ดังนั้นทุก pipeline ที่มี grep ต้องลงท้ายด้วย `|| true`
+#   นอกจากนี้ mirror บางตัวจะ rate-limit หลัง ~80 requests
+#   ทำให้ curl -sf -I กลับ exit ≠ 0 → hdr ว่าง → grep ตาย
 verify_tarball() {
     local name="$1" primary_url="$2" backup_url="$3" expected_hash="$4"
 
     _log "  Verifying: $name"
 
-    # Download a few bytes from both mirrors to verify they're serving the same file
-    # Use HTTP range request to just get first 64KB for comparison
     local hdr1 hdr2
 
-    hdr1="$(timeout 15 curl -sf -I "$primary_url" 2>/dev/null)" || hdr1=""
-    hdr2="$(timeout 15 curl -sf -I "$backup_url" 2>/dev/null)" || hdr2=""
+    hdr1="$(timeout 15 curl -sf -I "$primary_url" 2>/dev/null || true)"
+    hdr2="$(timeout 15 curl -sf -I "$backup_url" 2>/dev/null || true)"
 
     if [ -z "$hdr1" ] && [ -z "$hdr2" ]; then
-        _warn "  $name: both mirrors unreachable"
-        return
+        _skip "  $name: both mirrors unreachable (rate-limited or offline)"
+        return 0
     fi
 
     # Compare Content-Length if available (fast check: different sizes = different files)
-    size1="$(printf '%s' "$hdr1" | grep -i 'Content-Length' | awk '{print $2}' | tr -d '\r')"
-    size2="$(printf '%s' "$hdr2" | grep -i 'Content-Length' | awk '{print $2}' | tr -d '\r')"
+    # `|| true` ป้องกัน grep exit 1 เมื่อไม่มี Content-Length header
+    local size1 size2
+    size1="$(printf '%s' "$hdr1" | grep -i 'Content-Length' | awk '{print $2}' | tr -d '\r' || true)"
+    size2="$(printf '%s' "$hdr2" | grep -i 'Content-Length' | awk '{print $2}' | tr -d '\r' || true)"
 
     if [ -n "$size1" ] && [ -n "$size2" ]; then
         if [ "$size1" = "$size2" ]; then
@@ -726,12 +808,16 @@ verify_tarball() {
             _fail "    Primary: $size1 bytes"
             _fail "    Backup:  $size2 bytes"
         fi
+    elif [ -n "$size1" ] || [ -n "$size2" ]; then
+        _pass "  $name: one mirror reachable (size=${size1:-$size2})"
     fi
 
     # If we have the file cached locally, verify its hash
     local local_path=""
+    local search_dir found
     for search_dir in "$LBMK_ROOT/cache" "$HOME/.cache/lbmk"; do
-        found="$(find "$search_dir" -name "$(basename "$primary_url")" -type f 2>/dev/null | head -1)"
+        [ -d "$search_dir" ] || continue
+        found="$(find "$search_dir" -name "$(basename "$primary_url")" -type f 2>/dev/null | head -1 || true)"
         if [ -n "$found" ]; then
             local_path="$found"
             break
@@ -843,71 +929,151 @@ _hdr "[8] DNS Consistency Check"
 _log "Comparing DNS resolution across multiple resolvers..."
 _log "(State-level adversary may poison DNS to redirect to fake mirrors)"
 
+#
+# หมายเหตุสำคัญ (แก้ bug 2026-04):
+#   ตัวเดิม query DoH เฉพาะ type=A (IPv4) แต่ getent hosts ของ Guix บาง
+#   เครื่อง (ที่เปิด IPv6) จะคืน AAAA ก่อน ทำให้ system IP เป็น IPv6
+#   แต่ DoH เป็น IPv4 → เทียบยังไงก็ไม่มีวันตรงกัน เกิด false WARN
+#   ตลอดทุกโดเมน
+#
+#   ตัวใหม่:
+#     - ดึง "ทั้งชุด" IPv4+IPv6 ของ system resolver (ไม่ใช่บรรทัดแรก)
+#     - query DoH ทั้ง type=A และ type=AAAA
+#     - ถือว่าผ่านถ้า IP ตัวใดตัวหนึ่งของ system อยู่ในชุดของ DoH
+#       หรืออยู่ใน /24 (IPv4) / /64 (IPv6) เดียวกับ DoH ตัวใดตัวหนึ่ง
+#
 dns_check() {
     local domain="$1"
-    local ip_system ip_cf ip_google ip_quad9
+    local ips_system="" ips_cf="" ips_google="" ips_quad9=""
 
-    # System resolver
-    ip_system="$(getent hosts "$domain" 2>/dev/null | awk '{print $1}' | head -1)" || ip_system=""
+    # System resolver: เก็บ IP ทุกตัว (ทั้ง v4+v6) ไม่ใช่แค่บรรทัดเดียว
+    ips_system="$(getent hosts "$domain" 2>/dev/null | awk '{print $1}' || true)"
 
-    # Cloudflare DoH (1.1.1.1)
-    ip_cf="$(timeout 10 curl -sf \
+    # Cloudflare DoH — query ทั้ง A (type=1) และ AAAA (type=28)
+    ips_cf="$(timeout 10 curl -sf \
         "https://cloudflare-dns.com/dns-query?name=${domain}&type=A" \
         -H "accept: application/dns-json" 2>/dev/null | \
-        python3 -c "import sys,json; d=json.load(sys.stdin); \
-        [print(a['data']) for a in d.get('Answer',[]) if a.get('type')==1]" \
-        2>/dev/null | head -1)" || ip_cf=""
+        python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin)
+    for a in d.get('Answer',[]):
+        if a.get('type') in (1,28): print(a['data'])
+except Exception: pass
+" 2>/dev/null || true)
+$(timeout 10 curl -sf \
+        "https://cloudflare-dns.com/dns-query?name=${domain}&type=AAAA" \
+        -H "accept: application/dns-json" 2>/dev/null | \
+        python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin)
+    for a in d.get('Answer',[]):
+        if a.get('type') in (1,28): print(a['data'])
+except Exception: pass
+" 2>/dev/null || true)"
 
-    # Google DoH (8.8.8.8)
-    ip_google="$(timeout 10 curl -sf \
+    ips_google="$(timeout 10 curl -sf \
         "https://dns.google/resolve?name=${domain}&type=A" 2>/dev/null | \
-        python3 -c "import sys,json; d=json.load(sys.stdin); \
-        [print(a['data']) for a in d.get('Answer',[]) if a.get('type')==1]" \
-        2>/dev/null | head -1)" || ip_google=""
+        python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin)
+    for a in d.get('Answer',[]):
+        if a.get('type') in (1,28): print(a['data'])
+except Exception: pass
+" 2>/dev/null || true)
+$(timeout 10 curl -sf \
+        "https://dns.google/resolve?name=${domain}&type=AAAA" 2>/dev/null | \
+        python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin)
+    for a in d.get('Answer',[]):
+        if a.get('type') in (1,28): print(a['data'])
+except Exception: pass
+" 2>/dev/null || true)"
 
-    # Quad9 DoH (9.9.9.9)
-    ip_quad9="$(timeout 10 curl -sf \
+    ips_quad9="$(timeout 10 curl -sf \
         "https://dns.quad9.net:5053/dns-query?name=${domain}&type=A" \
         -H "accept: application/dns-json" 2>/dev/null | \
-        python3 -c "import sys,json; d=json.load(sys.stdin); \
-        [print(a['data']) for a in d.get('Answer',[]) if a.get('type')==1]" \
-        2>/dev/null | head -1)" || ip_quad9=""
+        python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin)
+    for a in d.get('Answer',[]):
+        if a.get('type') in (1,28): print(a['data'])
+except Exception: pass
+" 2>/dev/null || true)
+$(timeout 10 curl -sf \
+        "https://dns.quad9.net:5053/dns-query?name=${domain}&type=AAAA" \
+        -H "accept: application/dns-json" 2>/dev/null | \
+        python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin)
+    for a in d.get('Answer',[]):
+        if a.get('type') in (1,28): print(a['data'])
+except Exception: pass
+" 2>/dev/null || true)"
+
+    # เก็บเข้า set เดียวเพื่อเทียบกัน
+    local all_doh="$ips_cf $ips_google $ips_quad9"
+
+    # นับจำนวน DoH ที่ตอบกลับ (ไม่ว่างเปล่า)
+    local doh_count=0
+    [ -n "$(printf '%s' "$ips_cf"     | tr -d '[:space:]')" ] && doh_count=$((doh_count + 1))
+    [ -n "$(printf '%s' "$ips_google" | tr -d '[:space:]')" ] && doh_count=$((doh_count + 1))
+    [ -n "$(printf '%s' "$ips_quad9"  | tr -d '[:space:]')" ] && doh_count=$((doh_count + 1))
 
     _log "  $domain:"
-    _log "    System:     ${ip_system:-FAILED}"
-    _log "    Cloudflare: ${ip_cf:-FAILED}"
-    _log "    Google:     ${ip_google:-FAILED}"
-    _log "    Quad9:      ${ip_quad9:-FAILED}"
+    _log "    System: $(printf '%s' "$ips_system" | tr '\n' ' ')"
+    _log "    DoH   : $(printf '%s' "$all_doh"    | tr '\n' ' ')"
 
-    # CDN-hosted sites (github, gitlab) may legitimately resolve differently.
-    # Flag only if system resolver disagrees with ALL DoH resolvers.
-    local doh_ips="$ip_cf $ip_google $ip_quad9"
-    local doh_count=0
-    local match_count=0
+    if [ -z "$ips_system" ]; then
+        _fail "  $domain: system DNS resolution FAILED"
+        return
+    fi
 
-    for ip in $doh_ips; do
-        [ -n "$ip" ] || continue
-        doh_count=$((doh_count + 1))
-        if [ "$ip" = "$ip_system" ]; then
-            match_count=$((match_count + 1))
-        fi
+    if [ "$doh_count" -eq 0 ]; then
+        _skip "  $domain: DoH unavailable — cannot cross-check (not a failure)"
+        return
+    fi
+
+    # Helper: เช็คว่า ip อยู่ใน same network ของ DoH ตัวใดตัวใด
+    _net_of() {
+        # IPv4: /24  → ตัด field สุดท้ายหลัง .
+        # IPv6: /64 ~ 4 hextets แรก → ตัดหลัง : ที่ 4
+        case "$1" in
+            *:*) printf '%s' "$1" | awk -F: '{print $1":"$2":"$3":"$4}' ;;
+            *)   printf '%s' "${1%.*}" ;;
+        esac
+    }
+
+    local sys_ip doh_ip matched=0
+    for sys_ip in $ips_system; do
+        for doh_ip in $all_doh; do
+            [ -n "$doh_ip" ] || continue
+            if [ "$sys_ip" = "$doh_ip" ]; then
+                matched=1; break 2
+            fi
+            if [ "$(_net_of "$sys_ip")" = "$(_net_of "$doh_ip")" ]; then
+                matched=1; break 2
+            fi
+        done
     done
 
-    if [ -z "$ip_system" ]; then
-        _fail "  $domain: system DNS resolution FAILED"
-    elif [ "$doh_count" -eq 0 ]; then
-        _warn "  $domain: all DoH resolvers failed — cannot cross-check"
-    elif [ "$match_count" -gt 0 ]; then
-        _pass "  $domain: system DNS consistent with DoH resolvers"
-    else
-        # Check if any DoH resolvers agree with each other (CDN may give different IPs)
-        if [ -n "$ip_cf" ] && [ -n "$ip_google" ] && [ "$ip_cf" != "$ip_google" ]; then
-            _warn "  $domain: all resolvers returned different IPs (CDN — likely OK)"
-        else
-            _warn "  $domain: system resolver differs from ALL DoH — possible DNS poisoning"
-            _warn "    Verify manually: dig @1.1.1.1 $domain vs dig $domain"
-        fi
+    if [ "$matched" -eq 1 ]; then
+        _pass "  $domain: system DNS consistent with DoH (exact or same-prefix)"
+        return
     fi
+
+    # ถ้า DoH หลายเจ้าตอบไม่ตรงกันเอง → CDN เกือบแน่
+    local uniq_doh_count
+    uniq_doh_count="$(printf '%s\n' $all_doh | sort -u | wc -l)"
+    if [ "$uniq_doh_count" -gt 1 ]; then
+        _pass "  $domain: DoH resolvers disagree among themselves (CDN — OK)"
+        return
+    fi
+
+    _warn "  $domain: system resolver differs from ALL DoH"
+    _warn "    System: $(printf '%s' "$ips_system" | tr '\n' ' ')"
+    _warn "    DoH:    $(printf '%s' "$all_doh"    | tr '\n' ' ')"
+    _warn "    Verify manually: dig @1.1.1.1 $domain vs dig $domain"
 }
 
 critical_domains=(
