@@ -206,6 +206,43 @@ sudo flashprog -p internal -r /tmp/me_test.bin --ifd -i me 2>&1 | tail -3
 ป้องกัน kernel/initrd/grub.cfg บน disk ถูกแก้ไข
 **สำคัญ:** ชั้นนี้ต้องทำร่วมกับ SPI WP (ชั้นที่ 1) ถ้าไม่ WP attacker แก้ GRUB ใน ROM เพื่อปิด verify ได้
 
+### เปรียบเทียบกับ UEFI Secure Boot ของ Vendor
+
+ชั้นนี้คือ **Verified Boot** — concept เดียวกับ UEFI Secure Boot ของ vendor ทุกประการ
+แต่ต่างกันในจุดสำคัญที่สุด: **ใครถือกุญแจ**
+
+| | UEFI Secure Boot (Vendor) | GRUB GPG + SPI WP (Libreboot) |
+|---|---|---|
+| **Root of Trust** | Microsoft CA + OEM key ใน UEFI firmware | **GPG public key ของคุณ** ใน SPI ROM |
+| **ใครเลือกว่า boot อะไรได้** | Microsoft อนุมัติผ่าน MS CA | **คุณ sign เอง** ด้วย private key |
+| **เปลี่ยน key** | ยาก (OEM ล็อค, ต้อง MOK Manager) | ได้ — flash ROM ใหม่ |
+| **Crypto** | x509 certificates, PKCS#7 | GPG/PGP detached signatures |
+| **ป้องกัน tampered kernel** | ได้ | ได้ |
+| **Boot unsigned OS** | ไม่ได้ (ต้องปิด Secure Boot) | ไม่ได้ (ต้อง sign หรือปิด verify) |
+| **Trust chain ป้องกัน HW** | ไม่ได้ (firmware เขียนทับได้) | **ได้** (SPI flash write-protected) |
+
+**Trust chain เปรียบเทียบ:**
+
+```
+Vendor Secure Boot:
+  Microsoft root CA  →  signs shim  →  signs GRUB  →  signs kernel
+       ↑
+    คุณไม่ได้ควบคุม
+    Microsoft ตัดสินว่าเครื่องคุณ boot อะไรได้
+
+GRUB GPG + Libreboot:
+  GPG private key ของคุณ  →  signs grub.cfg  →  signs kernel  →  signs initrd
+       ↑
+    คุณถือเอง (เก็บใน air-gapped USB)
+
+  GPG public key ฝังใน ROM ที่ write-protected
+       ↑
+    คุณบัดกรี /WP pin เอง — ไม่มีใครแก้ได้นอกจากเข้าถึง hardware
+```
+
+**สรุป:** Libreboot ไม่ได้ปฏิเสธ verified boot — ปฏิเสธการให้ vendor ถือกุญแจแทนเจ้าของเครื่อง
+GRUB GPG + SPI WP คือ verified boot ที่ **user เป็น root of trust** ไม่ใช่ Microsoft
+
 ### GRUB modules ที่พร้อมอยู่แล้วใน ROM
 
 จาก `config/data/grub/module/xhci_nvme` — modules เหล่านี้ถูก build เข้า GRUB payload แล้ว:
