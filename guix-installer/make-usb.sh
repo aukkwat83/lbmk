@@ -29,6 +29,11 @@ GUIX_ISO="guix-system-install-${GUIX_VERSION}.x86_64-linux.iso"
 GUIX_ISO_URL="https://ftp.gnu.org/gnu/guix/${GUIX_ISO}"
 GUIX_SIG_URL="${GUIX_ISO_URL}.sig"
 
+# --- GPG signing key (Ludovic Courtès — Guix release manager) ---
+# https://guix.gnu.org/manual/en/html_node/USB-Stick-and-DVD-Installation.html
+GUIX_KEY_FINGERPRINT="3CE464558A84FDC69DB40CFB090B11993D9AEBB5"
+GUIX_KEY_URL="https://sv.gnu.org/people/viewgpg.php?user_id=15145"
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # =============================================================================
@@ -101,11 +106,69 @@ check_device() {
     fi
 }
 
+import_guix_key() {
+    local gnupg_dir="$1"
+
+    info "นำเข้า Guix signing key (${GUIX_KEY_FINGERPRINT:0:16}...)..."
+
+    # ลองดาวน์โหลดจาก GNU Savannah ก่อน
+    if wget -qO - "$GUIX_KEY_URL" | gpg --homedir "$gnupg_dir" --import - 2>/dev/null; then
+        ok "นำเข้า signing key จาก sv.gnu.org สำเร็จ"
+        return 0
+    fi
+
+    # fallback: ลองจาก keyserver
+    info "ลองดาวน์โหลดจาก keyserver แทน..."
+    if gpg --homedir "$gnupg_dir" --keyserver hkps://keys.openpgp.org \
+           --recv-keys "$GUIX_KEY_FINGERPRINT" 2>/dev/null; then
+        ok "นำเข้า signing key จาก keyserver สำเร็จ"
+        return 0
+    fi
+
+    return 1
+}
+
+verify_iso() {
+    local iso_path="$1"
+    local sig_path="${iso_path}.sig"
+
+    # สร้าง temporary GPG homedir เพื่อไม่ยุ่งกับ keyring ของผู้ใช้
+    local gnupg_tmp
+    gnupg_tmp="$(mktemp -d)"
+    chmod 700 "$gnupg_tmp"
+    trap "rm -rf '$gnupg_tmp'" RETURN
+
+    # ดาวน์โหลด signature ถ้ายังไม่มี
+    if [ ! -f "$sig_path" ]; then
+        info "ดาวน์โหลด GPG signature..."
+        wget -q -O "$sig_path" "$GUIX_SIG_URL" \
+            || die "ดาวน์โหลด GPG signature ไม่สำเร็จ"
+    fi
+
+    # นำเข้า signing key
+    import_guix_key "$gnupg_tmp" \
+        || die "ไม่สามารถนำเข้า Guix signing key ได้ — ตรวจสอบการเชื่อมต่อ internet"
+
+    # ตรวจสอบว่า key ที่ได้มาตรง fingerprint ที่คาดไว้
+    if ! gpg --homedir "$gnupg_tmp" --fingerprint "$GUIX_KEY_FINGERPRINT" >/dev/null 2>&1; then
+        die "Signing key ไม่ตรงกับ fingerprint ที่คาดไว้ — อาจถูกปลอมแปลง!"
+    fi
+
+    # Verify signature
+    info "ตรวจสอบ GPG signature..."
+    if gpg --homedir "$gnupg_tmp" --verify "$sig_path" "$iso_path" 2>/dev/null; then
+        ok "GPG signature ถูกต้อง — ISO มาจาก GNU Guix โดยตรง"
+    else
+        die "GPG signature ไม่ถูกต้อง! ISO อาจถูกแก้ไขหรือเสียหาย — หยุดทำงาน"
+    fi
+}
+
 download_iso() {
     local iso_path="${SCRIPT_DIR}/${GUIX_ISO}"
 
     if [ -f "$iso_path" ]; then
         info "พบ ISO อยู่แล้ว: $iso_path"
+        verify_iso "$iso_path"
         return
     fi
 
@@ -115,19 +178,7 @@ download_iso() {
     wget -c -O "$iso_path" "$GUIX_ISO_URL" \
         || die "ดาวน์โหลด ISO ไม่สำเร็จ"
 
-    # ดาวน์โหลด signature (optional verify)
-    info "ดาวน์โหลด GPG signature..."
-    wget -c -O "${iso_path}.sig" "$GUIX_SIG_URL" 2>/dev/null || true
-
-    if [ -f "${iso_path}.sig" ]; then
-        info "ตรวจสอบ GPG signature..."
-        if gpg --verify "${iso_path}.sig" "$iso_path" 2>/dev/null; then
-            ok "GPG signature ถูกต้อง"
-        else
-            warn "ไม่สามารถ verify GPG signature ได้ (อาจยังไม่มี Guix signing key)"
-            warn "สามารถ verify เองด้วย: gpg --verify ${iso_path}.sig"
-        fi
-    fi
+    verify_iso "$iso_path"
 
     ok "ดาวน์โหลดสำเร็จ: $iso_path"
 }
@@ -164,8 +215,10 @@ add_config_partition() {
 
     info "สร้าง partition สำหรับ config files (เริ่มที่ ${start_mib} MiB)..."
 
-    # สร้าง partition ใหม่ต่อท้าย ISO
-    parted -s "$dev" mkpart primary ext2 "${start_mib}MiB" "$(( start_mib + 512 ))MiB" \
+    # สร้าง partition ใหม่ต่อท้าย ISO ด้วย sfdisk
+    local start_sectors=$(( start_mib * 2048 ))
+    local size_sectors=$(( 512 * 2048 ))
+    echo "${start_sectors},${size_sectors},L" | sfdisk --append "$dev" \
         || die "สร้าง partition ไม่สำเร็จ"
 
     partprobe "$dev" 2>/dev/null || true
