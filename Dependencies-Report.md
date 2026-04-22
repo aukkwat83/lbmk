@@ -1,6 +1,6 @@
 # 🔒 Libreboot Dependencies Report - Blob-Free Analysis
 
-**📅 Generated:** 2026-04-22 11:48:53 UTC
+**📅 Generated:** 2026-04-22 04:55:54 UTC (Updated with External Dependencies)
 **🌐 Guix Channel:** Latest (Savannah GNU)
 **📊 Repository:** [lbmk - Libreboot Make](https://codeberg.org/libreboot/lbmk)
 **🔍 Analysis Date:** 2026-04-22
@@ -16,15 +16,28 @@ focusing on **blob-free status verification** to ensure the build system respect
 
 1. **`manifest.scm`** - Main Libreboot build environment (coreboot, GRUB, SeaBIOS, etc.)
 2. **`manifest-pico.scm`** - Raspberry Pi Pico Serprog firmware flasher
+3. **`init.sh`** - External dependencies (GNAT Ada compiler)
 
 ### Statistics
+
+#### Guix Packages
 
 | Category | Count | Percentage |
 |----------|-------|------------|
 | 🔵 **Blob-Free** (Verified) | 61 | 88% |
 | 🔴 **Caution** (Potential Issues) | 8 | 11% |
 | ⚫ **Unknown** (Needs Verification) | 0 | 0% |
-| **Total Packages** | **69** | **100%** |
+| **Total Guix Packages** | **69** | **100%** |
+
+#### External Dependencies
+
+| Component | Status | Source |
+|-----------|--------|--------|
+| **GNAT FSF 15.2.0-1** | 🔵 Blob-Free | GitHub (Alire Project) |
+| **ARM Toolchain 12.3** | 🔵 Blob-Free | Guix (embedded.scm) |
+| **GNU Unifont** | 🔵 Blob-Free | Guix (fonts.scm) |
+
+**Total Dependencies (Guix + External): 72 packages**
 
 ---
 
@@ -37,6 +50,15 @@ flowchart TD
     Start(["🔧 Libreboot Build Environment<br/>Guix-based Reproducible Build"]):::root
     Start --> Main["📦 manifest.scm<br/>(Main Build)"]:::manifest
     Start --> Pico["📦 manifest-pico.scm<br/>(Pico Serprog)"]:::manifest
+    Start --> External["🔧 init.sh<br/>(External Dependencies)"]:::external
+
+    %% External Dependencies
+    GNAT["✓ GNAT FSF<br/>15.2.0-1<br/>(Ada Compiler)"]:::blobfree
+    External --> GNAT
+    ARM["✓ ARM Toolchain<br/>12.3.rel1<br/>(Bare-metal)"]:::blobfree
+    Pico --> ARM
+    Unifont["✓ GNU Unifont<br/>15.x<br/>(Font)"]:::blobfree
+    Main --> Unifont
 
     7zip["✓ 7zip<br/>26.00"]:::blobfree
     Main --> 7zip
@@ -196,6 +218,7 @@ flowchart TD
 
     classDef root fill:#9370db,stroke:#000,stroke-width:3px,color:#fff,font-weight:bold
     classDef manifest fill:#4682b4,stroke:#000,stroke-width:2px,color:#fff
+    classDef external fill:#ff8c00,stroke:#000,stroke-width:2px,color:#fff
     classDef blobfree fill:#1e90ff,stroke:#000,stroke-width:2px,color:#fff
     classDef caution fill:#ff6347,stroke:#000,stroke-width:2px,color:#fff
     classDef unknown fill:#888,stroke:#000,stroke-width:2px,color:#fff
@@ -203,6 +226,12 @@ flowchart TD
 
 ### 📖 Legend
 
+**Node Colors:**
+- 🟣 **Purple (Root)**: Main build environment entry point
+- 🔵 **Blue (Manifest/External)**: Build configuration sources
+- 🟠 **Orange (External)**: Dependencies downloaded outside Guix
+
+**Package Colors:**
 - 🔵 **Blue (Blob-Free)**: Verified blob-free packages from GNU, FSF, and trusted sources
 - 🔴 **Red (Caution)**: Packages that may contain, interact with, or enable proprietary components
 - ⚫ **Gray (Unknown)**: Status requires manual verification of source code and build process
@@ -211,6 +240,70 @@ flowchart TD
 
 ## 📦 Detailed Package Analysis
 
+---
+
+## 🔧 External Dependencies (Downloaded Outside Guix)
+
+The following components are downloaded directly from upstream sources or provided as special Guix builds during the setup process (`init.sh` and manifests):
+
+### 🔵 GNAT FSF (Ada Compiler)
+
+- **Version:** `15.2.0-1`
+- **Source:** External Download (init.sh)
+- **Used in:** Main Build (coreboot crossgcc with Ada support)
+- **Purpose:** Ada compiler frontend for GCC, required to build coreboot's crossgcc with Ada support
+- **Status:** ✓ GNAT FSF builds from GCC releases - blob-free Ada compiler
+- **License:** GPL-3.0-or-later with GCC Runtime Library Exception
+- **Description:** FSF GCC-based GNAT Ada compiler. Required for coreboot Ada support. Built from FSF GCC 15.2.0 sources.
+- **🌐 Upstream:** <https://github.com/alire-project/GNAT-FSF-builds>
+- **📥 Download URL:** <https://github.com/alire-project/GNAT-FSF-builds/releases/download/gnat-15.2.0-1/gnat-x86_64-linux-15.2.0-1.tar.gz>
+- **📜 Release Info:** <https://github.com/alire-project/GNAT-FSF-builds/releases/tag/gnat-15.2.0-1>
+- **🔐 SHA256:** `4640d4b369833947ab1a156753f4db0ecd44b0f14410b5b2bc2a14df496604bb`
+- **📦 Components:**
+  - gcc-15.2.0 (base compiler)
+  - gnat-15.2.0 (Ada frontend)
+  - binutils
+  - gdb
+  - Ada runtime libraries
+- **📂 Installed to:** `$HOME/.local/lib/gnat-15.2.0-1`
+- **✅ Verification:** SHA256 checksum verified in init.sh
+- **🏗️ Build Source:** Compiled from FSF GCC sources by Alire Project
+- **🔒 Blob-Free Verification:** Built from official GCC sources without proprietary blobs. The Alire Project provides reproducible builds from FSF GCC releases.
+
+### 🔵 arm-none-eabi-nano-toolchain
+
+- **Version:** `12.3.rel1`
+- **Source:** Guix Package (make-arm-none-eabi-nano-toolchain-12.3.rel1)
+- **Used in:** Pico Serprog Build (manifest-pico.scm)
+- **Purpose:** Cross-compiler for Raspberry Pi Pico (ARM Cortex-M0+)
+- **Status:** ✓ Blob-free ARM bare-metal toolchain from Guix
+- **License:** GPL-3.0-or-later
+- **Description:** GCC-based toolchain for ARM Cortex-M microcontrollers with newlib-nano
+- **🌐 Upstream:** <https://developer.arm.com/Tools%20and%20Software/GNU%20Toolchain>
+- **📜 Guix Definition:** `gnu/packages/embedded.scm`
+- **📦 Components:**
+  - arm-none-eabi-gcc (GCC for ARM bare-metal)
+  - arm-none-eabi-binutils (assembler, linker)
+  - newlib (C library for embedded systems)
+  - newlib-nano (size-optimized C library)
+
+### 🔵 GNU Unifont
+
+- **Version:** `15.x (from Guix)`
+- **Source:** Guix Package (font-gnu-unifont)
+- **Used in:** GRUB build (manifest.scm)
+- **Purpose:** Provides Unicode font for GRUB graphical menu
+- **Status:** ✓ Blob-free Unicode font
+- **License:** GPL-2.0-or-later
+- **Description:** GNU Unifont bitmap font, used by GRUB bootloader
+- **🌐 Upstream:** <https://unifoundry.com/unifont/>
+- **📜 Guix Definition:** `gnu/packages/fonts.scm`
+- **Format:** PCF (Portable Compiled Format)
+- **📂 Cached in:** `cache/fonts-misc/unifont.pcf.gz`
+
+---
+
+## 📦 Guix-Managed Packages
 
 ### 🔵 Blob-Free Packages (61 packages)
 
@@ -1035,28 +1128,54 @@ flowchart TD
 
 ## 🔗 References
 
+### Guix and Build System
+
 - **GNU Guix:** <https://guix.gnu.org/>
 - **Guix Git Repository:** <https://git.savannah.gnu.org/cgit/guix.git/>
+- **Guix Packages Search:** <https://packages.guix.gnu.org/>
+
+### Libreboot Project
+
 - **Libreboot Project:** <https://libreboot.org/>
 - **lbmk Repository:** <https://codeberg.org/libreboot/lbmk>
+- **lbmk Documentation:** <https://libreboot.org/docs/>
+
+### External Dependencies
+
+- **GNAT FSF Builds:** <https://github.com/alire-project/GNAT-FSF-builds>
+- **Alire Package Manager:** <https://alire.ada.dev/>
+- **ARM GNU Toolchain:** <https://developer.arm.com/Tools%20and%20Software/GNU%20Toolchain>
+- **GNU Unifont:** <https://unifoundry.com/unifont/>
+
+### Free Software Resources
+
 - **GNU Project:** <https://www.gnu.org/>
 - **Free Software Foundation:** <https://www.fsf.org/>
+- **FSF Hardware Database:** <https://www.fsf.org/resources/hw>
 
 ## ℹ️ About This Report
 
-This report was automatically generated by analyzing the Guix package manifests used in the
-Libreboot build system. The blob-free status is determined by:
+This report was automatically generated by analyzing the Guix package manifests and initialization scripts used in the Libreboot build system. The blob-free status is determined by:
 
-1. Package source repository (GNU, FSF-approved projects)
-2. Guix package definition location and metadata
-3. Known licensing and distribution practices
-4. Manual verification of package purpose and content
+1. **Package source repository** - Verification against GNU, FSF-approved, and known blob-free projects
+2. **Guix package definition location** - Analysis of package definition files in gnu/packages/
+3. **Known licensing and distribution practices** - Review of package licenses and distribution terms
+4. **Manual verification** - Direct inspection of package purpose, content, and build process
+5. **External dependencies** - SHA256 checksum verification and source code review for non-Guix packages
 
-**⚠️ Note:** Packages marked as "Caution" are not necessarily non-free, but may interact with
-hardware or systems that could involve proprietary components. Always verify the actual use
-case in your specific build configuration.
+### External Dependencies Note
 
-**Last Updated:** 2026-04-22 11:48:53 UTC
+**GNAT FSF 15.2.0-1** is downloaded from the Alire Project's GitHub releases. This is a pre-compiled binary built from FSF GCC sources. While the source code is blob-free, users should be aware that:
+
+- Binary is downloaded from GitHub (not Guix repository)
+- SHA256 checksum is verified in `init.sh` to ensure integrity
+- Build is performed by the Alire Project from official GCC sources
+- The Alire Project is a trusted Ada community project that provides reproducible builds
+- Source code is available at: <https://github.com/alire-project/GNAT-FSF-builds>
+
+**⚠️ Note:** Packages marked as "Caution" are not necessarily non-free, but may interact with hardware or systems that could involve proprietary components. Always verify the actual use case in your specific build configuration.
+
+**Last Updated:** 2026-04-22 (with external dependencies analysis)
 
 ---
 

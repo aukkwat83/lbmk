@@ -1,0 +1,70 @@
+[
+  {
+    "name": "GNAT FSF (Ada Compiler)",
+    "version": "15.2.0-1",
+    "source": "External Download",
+    "upstream_url": "https://github.com/alire-project/GNAT-FSF-builds",
+    "download_url": "https://github.com/alire-project/GNAT-FSF-builds/releases/download/gnat-15.2.0-1/gnat-x86_64-linux-15.2.0-1.tar.gz",
+    "sha256": "4640d4b369833947ab1a156753f4db0ecd44b0f14410b5b2bc2a14df496604bb",
+    "blob_free": "true",
+    "license": "GPL-3.0-or-later with GCC Runtime Library Exception",
+    "note": "\u2713 GNAT FSF builds from GCC releases - blob-free Ada compiler",
+    "description": "FSF GCC-based GNAT Ada compiler. Required for coreboot Ada support. Built from FSF GCC 15.2.0 sources.",
+    "used_in": [
+      "init.sh",
+      "Main Build (coreboot crossgcc)"
+    ],
+    "purpose": "Ada compiler frontend for GCC, required to build coreboot's crossgcc with Ada support",
+    "components": [
+      "gcc-15.2.0 (base compiler)",
+      "gnat-15.2.0 (Ada frontend)",
+      "binutils",
+      "gdb",
+      "Ada runtime libraries"
+    ],
+    "maintainer": "Alire Project",
+    "build_source": "Built from FSF GCC sources",
+    "verification": "SHA256 checksum verified in init.sh",
+    "installed_to": "$HOME/.local/lib/gnat-15.2.0-1",
+    "reference_url": "https://github.com/alire-project/GNAT-FSF-builds/releases/tag/gnat-15.2.0-1"
+  },
+  {
+    "name": "arm-none-eabi-nano-toolchain",
+    "version": "12.3.rel1",
+    "source": "Guix Package (make-arm-none-eabi-nano-toolchain-12.3.rel1)",
+    "blob_free": "true",
+    "license": "GPL-3.0-or-later",
+    "note": "\u2713 Blob-free ARM bare-metal toolchain from Guix",
+    "description": "GCC-based toolchain for ARM Cortex-M microcontrollers with newlib-nano",
+    "used_in": [
+      "manifest-pico.scm",
+      "Pico Serprog Build"
+    ],
+    "purpose": "Cross-compiler for Raspberry Pi Pico (ARM Cortex-M0+)",
+    "components": [
+      "arm-none-eabi-gcc",
+      "arm-none-eabi-binutils",
+      "newlib (C library)",
+      "newlib-nano (size-optimized C library)"
+    ],
+    "upstream_url": "https://developer.arm.com/Tools%20and%20Software/GNU%20Toolchain",
+    "guix_definition": "gnu/packages/embedded.scm"
+  },
+  {
+    "name": "GNU Unifont",
+    "version": "15.x (from Guix)",
+    "source": "Guix Package (font-gnu-unifont)",
+    "blob_free": "true",
+    "license": "GPL-2.0-or-later",
+    "note": "\u2713 Blob-free Unicode font",
+    "description": "GNU Unifont bitmap font, used by GRUB bootloader",
+    "used_in": [
+      "manifest.scm",
+      "GRUB build"
+    ],
+    "purpose": "Provides Unicode font for GRUB graphical menu",
+    "upstream_url": "https://unifoundry.com/unifont/",
+    "format": "PCF (Portable Compiled Format)",
+    "cached_in": "cache/fonts-misc/unifont.pcf.gz"
+  }
+]
